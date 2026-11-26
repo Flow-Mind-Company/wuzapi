@@ -480,6 +480,26 @@ func canonicalStoreJID(deviceStore *store.Device) string {
 	return deviceStore.ID.ToNonAD().String()
 }
 
+// newestDeviceByAccountKey picks the most recently linked device of an account (highest device number).
+// A re-link leaves the previous companion row in the store although WhatsApp has already revoked it:
+// taking the first row reconnected with that stale device, got "401: logged out from another device"
+// and dropped a session that was still alive under the newer device.
+func newestDeviceByAccountKey(devices []*store.Device, key string) (*store.Device, int) {
+	var newest *store.Device
+	matches := 0
+	for _, deviceStore := range devices {
+		resolved := canonicalStoreJID(deviceStore)
+		if resolved == "" || jidUserKey(resolved) != key {
+			continue
+		}
+		matches++
+		if newest == nil || deviceStore.ID.Device > newest.ID.Device {
+			newest = deviceStore
+		}
+	}
+	return newest, matches
+}
+
 // resolveDeviceStore loads an existing WhatsApp session from sqlstore. When
 // users.jid does not exactly match whatsmeow_device.jid (common after LID/AD
 // format changes), it falls back to matching by account key so reconnect does
@@ -509,17 +529,15 @@ func (s *server) resolveDeviceStore(ctx context.Context, textjid string) (*store
 			allDevices, err := container.GetAllDevices(ctx)
 			if err != nil {
 				log.Error().Err(err).Msg("Failed to list devices from store")
-			} else {
-				for _, deviceStore := range allDevices {
-					if resolved := canonicalStoreJID(deviceStore); resolved != "" && jidUserKey(resolved) == key {
-						log.Info().
-							Str("user_jid", textjid).
-							Str("store_jid", deviceStore.ID.String()).
-							Str("resolved_jid", resolved).
-							Msg("Resolved device by account key")
-						return deviceStore, resolved
-					}
-				}
+			} else if deviceStore, matches := newestDeviceByAccountKey(allDevices, key); deviceStore != nil {
+				resolved := canonicalStoreJID(deviceStore)
+				log.Info().
+					Str("user_jid", textjid).
+					Str("store_jid", deviceStore.ID.String()).
+					Str("resolved_jid", resolved).
+					Int("account_devices", matches).
+					Msg("Resolved device by account key")
+				return deviceStore, resolved
 			}
 		}
 
